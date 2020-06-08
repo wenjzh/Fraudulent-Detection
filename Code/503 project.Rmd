@@ -1,0 +1,254 @@
+---
+title: "503_audit_final"
+author: "Benhan liu, Wenjing Zhou, Lei Zhang, Enhao Li"
+date: "4/26/2020"
+output: html_document
+---
+
+```{r} 
+# Libraries
+library(ggplot2)
+library(ggthemes)
+library(corrplot)
+library(reshape2)
+library(dplyr)
+library(naniar)
+library(tidyverse)
+library(randomForest)
+library(MASS)
+library(rpart)
+library(rpart.plot)
+library(rattle)
+library(GGally)
+library(e1071)
+```
+
+## Preprocess
+```{r}
+# import dataset and check for structure of the data and transform the predictor "Risk" from integer to factor form. 
+data=read.csv("trial.csv")
+dim(data)
+data$Risk=as.factor(data$Risk)
+str(data)
+summary(data)
+
+# Observing One missing value and therefore delete that one
+sum(is.na(data))
+gg_miss_var(data)
+data=na.omit(data)
+sum(is.na(data))
+
+# separting into train and test data set
+set.seed(503)
+test_id = sample(1:nrow(data), 78, replace = F)
+data_test = data[test_id,]
+data= data[-test_id,]
+
+```
+
+
+
+## EDA
+
+```{r}
+# boxplot
+
+par(mfrow=c(4,4),pin=c(0.6,0.8))
+for (i in 1:16) {
+boxplot(data[,-c(2,18)][,i],main= names(data[,-c(2,18)])[i]  )
+}
+
+```
+
+```{r, message=FALSE, warning=FALSE}
+# scatter plot
+audit_pairs = ggpairs(data[,-2],axisLabels = "none",
+        upper = list(continuous = "points", combo = "dot"),
+        lower = list(continuous = "cor", combo = "dot"),
+        diag = list(continuous = "densityDiag")) + theme_bw() 
+audit_pairs
+save.image('pairs.jpg')
+```
+
+
+
+```{r}
+corrplot(cor(data[,-c(2,ncol(data))]))
+# we are tring to predict Risk, so we are looking for some relationships between Risk and other predictors.
+# we can see that the variable score has the strongest correlation. Also one observation is that the collinearity may exists as the feature 'Score' is a linear combination of 'Score_A' and 'Score_B'. Except for the feature "Score" and its 'relevant' variables. "Money_value" also possess a quite high correlation compared with others'
+```
+```{r}
+# Observing the distribution of 'Score'
+ggplot(data, aes(x = data$Score)) + 
+        geom_area(stat = "bin", 
+                     binwidth = 0.5, 
+                     colour = "royalblue",
+                     fill = "skyblue",
+                     linetype = "solid") +
+        ggtitle("Distribution of Score")
+```
+
+
+```{r}
+Plot2 <- ggplot(data, aes(Money_Value,Score, col=Risk))+geom_point(size=5)
+Plot2
+## we obersve that even if you have high score but a low money value that is close to 0, the risk is 0.
+```
+
+```{R}
+data_zero = data[data$Risk == 0,-2]
+data_one = data[data$Risk == 1,-2]
+
+sd1 = apply(data_zero[-ncol(data_zero)], 2, sd)
+```
+
+For the group with Risk equals 0, the standard deviation for several predictors is 0, which indicates that cases with Risk equals 0 have the same value on these predictors. And that is why NA occurs in pairs plot. 
+
+```{R}
+sd2 = apply(data_one[,-ncol(data_one)], 2, sd)
+```
+
+
+
+
+```{R}
+lm_data = data[,-c(2,ncol(data))]
+lm_data = as.data.frame(apply(lm_data, 2, function(x){return((x-mean(x))/sd(x))}))
+## delete 'SCORE_A'
+lm_data = lm_data[,-3]
+## delete 'TOTAL'
+lm_data = lm_data[,-5]
+## delete 'Score'
+lm_data = lm_data[,-14]
+## delete 'LOSS_Score'
+lm_data = lm_data[-11]
+R_square=vector()
+for(i in 1:ncol(lm_data))
+{
+  temp <- lm(lm_data[,i]~., data = lm_data[,-i])
+  R_square[i] = summary(temp)$r.squared
+}
+print(cbind(colnames(lm_data),R_square))
+```
+By deleting some variables to make R square for each is below 0.85. 
+
+
+## Different methods
+### QDA
+```{R}
+qda_data = data[,c(1,3,7, 10, 18)]
+
+
+lda_data = subset(data, select = colnames(lm_data))
+lda_data = cbind(lda_data, data$Risk)
+colnames(lda_data)[ncol(lda_data)] = 'Risk'
+
+qda_result = qda(Risk~., qda_data)
+lda_result = lda(Risk~., lda_data)
+
+lda_predict = predict(lda_result, data_test)
+qda_predict = predict(qda_result, data_test)
+
+lda_train_predict = predict(lda_result, qda_data)
+qda_train_perdict = predict(qda_result, qda_data)
+
+cat('False rate for lda ', mean(lda_predict$class != data_test$Risk))
+cat('False rate for qda ', mean(qda_predict$class != data_test$Risk))
+
+cat('False rate for lda ', mean(lda_train_predict$class != qda_data$Risk))
+cat('False rate for qda ', mean(qda_train_predict$class != qda_data$Risk))
+```
+
+
+### classification tree
+```{r}
+tree = rpart(Risk ~ .,data=data,method="class")
+tree_score = rpart(Risk ~ .-Score,data=data,method="class")
+printcp(tree_score)
+plotcp(tree_score)
+fancyRpartPlot((tree_score))
+printcp(tree)
+class.pred=predict(tree_score,data_test,type='class')
+class.pred.train=predict(tree_score,data,type='class')
+table(class.pred,data_test$Risk)
+
+# test error rate
+sum(class.pred != data_test$Risk)/dim(data_test)[1]
+
+# train error rate
+sum(class.pred.train != data$Risk)/dim(data)[1]
+```
+Using classification tree to fit training data. If we use all independent variables to fit the model and predict `Risk`, there is only one split by variable `score` in the classification tree. This implies that `score` has perfect strong relationship with variable `Risk`. We remove the variable `score`, and using all the other independent variables to fit the model, and there are six splits along with six variables are useful for predict `Risk`
+Thet are variables `TOTAL`,`District`,`MONEY_marks`,`PARA_A`,`SCORE_B`,`LOCATION_ID`. These variables are crucial for predicting `Risk`. The test error rate of classification tree model is small, so it serves as a good performance with high prediction accuracy. We can use classification model to predict `Risk`.
+
+## randomforest
+```{r}
+set.seed(24680)
+rf <- randomForest(Risk ~ ., data=data, importance=TRUE,mtry=sqrt(16))
+varImpPlot(rf)
+rf_score <- randomForest(Risk ~ ., data=data[,-17], importance=TRUE,mtry=sqrt(16))
+varImpPlot(rf_score)
+rf.pred=predict(rf_score,newdata=data_test[,-17])
+rf.pred.train=predict(rf_score,newdata=data[,-17])
+table(rf.pred,data_test$Risk)
+
+# test error rate
+sum(rf.pred != data_test$Risk)/dim(data_test)[1]
+
+# train error rate
+sum(rf.pred.train != data$Risk)/dim(data)[1]
+```
+Random Forest has simiarly performance as classification tree. By using `importance` function, we view that `Score` is still the most important for `risk`. Except for `Score`, other important variables are `PARA_A``SCORE_A``TOTAL``DISTRICT``SCORE_B`, they are nwwwwearly same with classification tree. Furthermore, Random Forest has similar performance on test data with classification tree with similar test error rate.
+
+## logistic regression model
+```{r,warning= FALSE}
+# using the top five important variable in Important Plot to perform logistic regression 
+logit.fit=glm(Risk~Sector_score + PARA_A + PARA_B + SCORE_B + numbers + Marks + Money_Value + MONEY_Marks + District + Loss+History+History_score,data=data[,-c(2,17)],family=binomial(link = 'logit'))
+
+logit.fit = glm(Risk ~., data = data[,-c(2,17)], family = binomial(link = 'logit'))
+xtable(summary(logit.fit))
+logit.pred=predict(logit.fit,newdata = data_test[,-c(2,17)],type='response')
+logit.pred=round(logit.pred)
+logit.pred.train=round(predict(logit.fit,newdata = data[,-c(2,17)],type='response'))
+table(data_test$Risk,logit.pred)
+
+# test error rate
+sum(logit.pred != data_test$Risk)/dim(data_test)[1]
+# train error rate
+sum(logit.pred.train != data$Risk)/dim(data)[1]
+```
+
+### SVM method
+```{r}
+# using the top fourth important variable in Important Plot to perform SVM method
+set.seed(2020)
+
+data_svm = data[,c(-2,-17, -18)]
+m =colMeans(data_svm)
+v = apply(data_svm, 2, sd)
+
+data_svm2 = scale(data_svm, m, v)
+
+
+data_svm2 = as.data.frame(data_svm2)
+data_svm2 = cbind(data_svm2, data[,18])
+
+colnames(data_svm2)[16] = 'Risk'
+
+fit.svm=svm (Risk~.-Risk,data_svm2)
+fit.svm
+
+data_test_svm = data_test[,-c(2, 17, 18)]
+
+data_test_svm = t(apply(data_test_svm, 1, function(x){return((x - m)/v)}))
+
+
+svm.pred=predict(fit.svm, newdata=data_test_svm)
+svm.pred.train=predict(fit.svm, newdata=data_svm2)
+table(data_test$Risk,svm.pred)
+
+# test error rate
+sum(svm.pred != data_test$Risk)/dim(data_test)[1]
+# train error rate
+sum(svm.pred.train != data$Risk)/dim(data)[1]
+```
